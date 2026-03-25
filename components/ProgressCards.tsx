@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { ProjectTask } from "@/lib/types";
 
 type ProgressCardsProps = {
@@ -15,9 +16,10 @@ function averageProgress(tasks: ProjectTask[]): number {
 }
 
 export function ProgressCards({ tasks }: ProgressCardsProps) {
+  const [now] = useState(() => Date.now());
   const delayedCount = tasks.filter((task) => {
     if (!task.endDate) return false;
-    return new Date(task.endDate).getTime() < Date.now() && task.percentComplete < 100;
+    return new Date(task.endDate).getTime() < now && task.percentComplete < 100;
   }).length;
   const keyCount = tasks.filter((task) => task.isKeyControl).length;
 

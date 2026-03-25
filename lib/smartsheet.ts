@@ -1,207 +1,147 @@
-import type { ProjectData, ProjectSummary, ProjectTask } from "@/lib/types";
+import { SmartsheetProgress, Milestone } from "./types";
 
-type SmartsheetCell = {
-  columnId: number;
-  value?: string | number | boolean | null;
-  displayValue?: string | null;
-};
+// Smartsheet API 服务
+export class SmartsheetService {
+  private static instance: SmartsheetService;
+  private accessToken: string;
+  private baseUrl = "https://api.smartsheet.com/2.0";
 
-type SmartsheetColumn = {
-  id: number;
-  title: string;
-};
-
-type SmartsheetRow = {
-  id: number;
-  cells: SmartsheetCell[];
-};
-
-type SmartsheetSheet = {
-  id: number;
-  name: string;
-  columns: SmartsheetColumn[];
-  rows: SmartsheetRow[];
-};
-
-const SMARTSHEET_BASE_URL = "https://api.smartsheet.com/2.0";
-
-class SmartsheetApiError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.status = status;
-  }
-}
-
-function getToken(): string {
-  const token = process.env.SMARTSHEET_API_TOKEN;
-  if (!token) {
-    throw new Error("Missing SMARTSHEET_API_TOKEN in environment.");
-  }
-  return token;
-}
-
-function parseConfiguredSheetIds(): number[] {
-  const raw = process.env.SMARTSHEET_SHEET_IDS?.trim();
-  if (!raw) {
-    return [];
-  }
-  return raw
-    .split(",")
-    .map((item) => Number(item.trim()))
-    .filter((num) => Number.isFinite(num) && num > 0);
-}
-
-async function smartsheetFetch<T>(path: string): Promise<T> {
-  const token = getToken();
-  const response = await fetch(`${SMARTSHEET_BASE_URL}${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new SmartsheetApiError(
-      `Smartsheet API request failed (${response.status}): ${body}`,
-      response.status,
-    );
+  private constructor() {
+    this.accessToken = process.env.SMARTSHEET_ACCESS_TOKEN || "";
   }
 
-  return (await response.json()) as T;
-}
-
-function normalizeKey(input: string): string {
-  return input.toLowerCase().replace(/\s|_/g, "");
-}
-
-function matchesColumn(title: string, aliases: string[]): boolean {
-  const normalized = normalizeKey(title);
-  return aliases.some((alias) => normalized.includes(normalizeKey(alias)));
-}
-
-function getCellValue(row: SmartsheetRow, columnId: number): string {
-  const cell = row.cells.find((item) => item.columnId === columnId);
-  if (!cell) {
-    return "";
+  public static getInstance(): SmartsheetService {
+    if (!SmartsheetService.instance) {
+      SmartsheetService.instance = new SmartsheetService();
+    }
+    return SmartsheetService.instance;
   }
-  if (typeof cell.displayValue === "string") {
-    return cell.displayValue;
-  }
-  if (cell.value === null || cell.value === undefined) {
-    return "";
-  }
-  return String(cell.value);
-}
 
-function toDateOrNull(input: string): string | null {
-  const value = input.trim();
-  if (!value) {
-    return null;
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-  return date.toISOString().slice(0, 10);
-}
+  private async request(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<any> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        "Content-Type": "application/json",
+        ...options.headers,
+      },
+    });
 
-function clampPercent(input: string): number {
-  const numeric = Number(input.toString().replace("%", "").trim());
-  if (!Number.isFinite(numeric)) {
-    return 0;
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Smartsheet API Error: ${response.status} - ${error}`);
+    }
+
+    return response.json();
   }
-  return Math.max(0, Math.min(100, Math.round(numeric)));
-}
 
-function extractTasks(sheet: SmartsheetSheet): ProjectTask[] {
-  const taskCol = sheet.columns.find((col) =>
-    matchesColumn(col.title, ["task", "任务", "name", "标题"]),
-  );
-  const ownerCol = sheet.columns.find((col) =>
-    matchesColumn(col.title, ["owner", "assignee", "负责人", "责任人", "资源"]),
-  );
-  const statusCol = sheet.columns.find((col) =>
-    matchesColumn(col.title, ["status", "状态", "进度状态"]),
-  );
-  const startCol = sheet.columns.find((col) =>
-    matchesColumn(col.title, ["start", "开始"]),
-  );
-  const endCol = sheet.columns.find((col) =>
-    matchesColumn(col.title, ["end", "finish", "due", "结束", "截止"]),
-  );
-  const progressCol = sheet.columns.find((col) =>
-    matchesColumn(col.title, ["percent", "%", "progress", "完成率", "进度"]),
-  );
+  // 从 URL 提取 Sheet ID
+  extractSheetId(url: string): string {
+    const match = url.match(/\/([a-zA-Z0-9]+)(?:\/|\?|$)/);
+    return match ? match[1] : "";
+  }
 
-  return sheet.rows
-    .map((row) => {
-      const name = taskCol ? getCellValue(row, taskCol.id).trim() : "";
-      if (!name) {
-        return null;
+  // 获取 Sheet 信息
+  async getSheet(sheetId: string): Promise<any> {
+    return this.request(`/sheets/${sheetId}`);
+  }
+
+  // 获取 Sheet 所有行
+  async getRows(sheetId: string): Promise<any> {
+    const sheet = await this.getSheet(sheetId);
+    return this.request(`/sheets/${sheetId}/rows`);
+  }
+
+  // 计算整体进度
+  async calculateProgress(sheetId: string): Promise<SmartsheetProgress> {
+    try {
+      const sheet = await this.getSheet(sheetId);
+      const rows = await this.getRows(sheetId);
+
+      let totalRows = rows.length;
+      let completedRows = 0;
+      let milestones: Milestone[] = [];
+
+      // 解析每一行的状态
+      for (const row of rows) {
+        const rowObj = row;
+
+        // 查找状态列 (通常是 "Status" 或 "状态")
+        const statusCell = rowObj.cells?.find((cell: any) =>
+          cell.columnId === sheet.columns?.find((col: any) =>
+            col.title?.toLowerCase().includes("status") ||
+            col.title?.toLowerCase().includes("状态")
+          )?.id
+        );
+
+        if (statusCell) {
+          const status = statusCell.value?.toLowerCase() || "";
+
+          // 检查是否完成
+          if (status.includes("complete") || status.includes("done") || status === "已完成") {
+            completedRows++;
+          }
+
+          // 提取里程碑信息
+          const nameCell = rowObj.cells?.find((cell: any) =>
+            cell.columnId === sheet.columns?.find((col: any) =>
+              col.title?.toLowerCase().includes("task") ||
+              col.title?.toLowerCase().includes("name") ||
+              col.title?.toLowerCase().includes("任务")
+            )?.id
+          );
+
+          if (nameCell && statusCell.value) {
+            let milestoneStatus: Milestone["status"] = "Not Started";
+            if (status.includes("complete") || status.includes("done") || status === "已完成") {
+              milestoneStatus = "Completed";
+            } else if (status.includes("progress") || status.includes("进行中")) {
+              milestoneStatus = "In Progress";
+            }
+
+            milestones.push({
+              name: nameCell.value || "Unknown",
+              status: milestoneStatus,
+            });
+          }
+        }
       }
-      const owner = ownerCol ? getCellValue(row, ownerCol.id) : "";
-      const status = statusCol ? getCellValue(row, statusCol.id) : "";
-      const startRaw = startCol ? getCellValue(row, startCol.id) : "";
-      const endRaw = endCol ? getCellValue(row, endCol.id) : "";
-      const progressRaw = progressCol ? getCellValue(row, progressCol.id) : "";
+
+      const progress = totalRows > 0 ? (completedRows / totalRows) * 100 : 0;
 
       return {
-        id: row.id,
-        name,
-        owner: owner || "未分配",
-        status: status || "未更新",
-        startDate: toDateOrNull(startRaw),
-        endDate: toDateOrNull(endRaw),
-        percentComplete: clampPercent(progressRaw),
-        isKeyControl: name.trim().startsWith("*"),
-      } satisfies ProjectTask;
-    })
-    .filter((task): task is ProjectTask => task !== null);
-}
+        sheetId,
+        totalRows,
+        completedRows,
+        progress,
+        milestones: milestones.slice(0, 10), // 只返回前10个里程碑
+      };
+    } catch (error) {
+      console.error("Error calculating Smartsheet progress:", error);
+      throw error;
+    }
+  }
 
-export async function listProjects(): Promise<ProjectSummary[]> {
-  const configuredIds = parseConfiguredSheetIds();
-  if (configuredIds.length > 0) {
-    const projects = await Promise.all(
-      configuredIds.map(async (sheetId) => {
-        const sheet = await smartsheetFetch<SmartsheetSheet>(`/sheets/${sheetId}`);
-        return { id: sheet.id, name: sheet.name };
+  // 获取关键里程碑
+  async getMilestones(sheetId: string): Promise<Milestone[]> {
+    const progress = await this.calculateProgress(sheetId);
+    return progress.milestones || [];
+  }
+
+  // 更新行状态
+  async updateRow(sheetId: string, rowId: string, updates: any): Promise<any> {
+    return this.request(`/sheets/${sheetId}/rows`, {
+      method: "PUT",
+      body: JSON.stringify({
+        id: rowId,
+        cells: updates,
       }),
-    );
-    return projects;
+    });
   }
-
-  const payload = await smartsheetFetch<{ data: Array<{ id: number; name: string }> }>(
-    "/sheets?pageSize=50",
-  );
-  return payload.data.map((sheet) => ({ id: sheet.id, name: sheet.name }));
 }
 
-export async function getProjectData(sheetId: number): Promise<ProjectData> {
-  const sheet = await smartsheetFetch<SmartsheetSheet>(`/sheets/${sheetId}`);
-  return {
-    id: sheet.id,
-    name: sheet.name,
-    tasks: extractTasks(sheet),
-  };
-}
-
-export function toUiError(error: unknown): string {
-  if (error instanceof SmartsheetApiError) {
-    if (error.status === 401 || error.status === 403) {
-      return "Smartsheet 鉴权失败，请检查 API Token。";
-    }
-    if (error.status === 404) {
-      return "未找到对应 Smartsheet 项目，请检查 Sheet ID。";
-    }
-    return "Smartsheet 请求失败，请稍后重试。";
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return "发生未知错误。";
-}
+export const smartsheetService = SmartsheetService.getInstance();
